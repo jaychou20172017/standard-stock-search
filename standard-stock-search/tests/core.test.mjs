@@ -1,0 +1,17 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {evaluate,processTask} from '../scripts/core.mjs';
+const r={id:'001',name:'商品',brand:'品牌',model:'001-A',quantity:20,unit:'个',country:'中国',city:'上海'};
+const q={request_id:'001',channel:'模拟渠道',region:'CN',url:'https://example.com/item',checked_at:'2026-10-18T10:00:00+08:00',evidence:'仅测试',exact:true,original_verified:true,conditions_met:true,pack_units:10,stock_packs:3,moq_packs:1,multiple_packs:1,price_pack:100,currency:'CNY',tier_min_packs:1,tax:'含税'};
+const c={complete:true,queries:['测试'],scope:'模拟范围',stop_reason:'测试结束'};
+test('包装价与需求数量、阶梯范围',()=>{assert.equal(evaluate(r,q).price,10);assert.equal(evaluate(r,{...q,tier_min_packs:3}).price,null);assert.equal(evaluate(r,{...q,stock_packs:1}).eligible,false);assert.equal(evaluate({...r,quantity:15},q).eligible,false);});
+test('未知库存、商家声明、缺配送均不合格',()=>{for(const patch of [{stock_packs:null},{original_verified:false},{conditions_met:false}])assert.equal(evaluate(r,{...q,...patch}).eligible,false);});
+test('外币需有汇率来源日期',()=>{assert.equal(evaluate(r,{...q,currency:'USD'}).price,null);assert.equal(evaluate(r,{...q,currency:'USD',fx_cny:7,fx_source:'模拟',fx_date:'2026-10-18'}).price,70);});
+test('大陆无合格渠道必须完成全球，不因询价强制全球',()=>{assert.throws(()=>processTask({requests:[r],quotes:[],coverage:{'001':{mainland:c}}}),/全球/);assert.equal(processTask({requests:[r],quotes:[{...q,price_pack:null}],coverage:{'001':{mainland:c}}}).summary[0].count,1);});
+test('税况分组、低价不合格不排名、去重',()=>{const t=processTask({requests:[r],quotes:[q,q,{...q,channel:'B',price_pack:80},{...q,channel:'C',price_pack:1,stock_packs:0},{...q,channel:'D',tax:'未知'}],coverage:{'001':{mainland:c}}});assert.equal(t.rows.length,4);assert.equal(t.rows.find(x=>x.channel==='B').rank,1);assert.equal(t.rows.find(x=>x.channel==='C').rank,undefined);assert.equal(t.rows.find(x=>x.channel==='D').rank,1);});
+test('零结果仍保留全部需求',()=>{const t=processTask({requests:[r],quotes:[],coverage:{'001':{mainland:c,global:c}}});assert.equal(t.summary.length,1);assert.equal(t.summary[0].count,0);});
+test('未知需求或重复需求拒绝',()=>{assert.throws(()=>processTask({requests:[r,r]}),/重复/);assert.throws(()=>processTask({requests:[r],quotes:[{...q,request_id:'X'}]}),/未知需求/);});
+test('包装无效不产生无穷价格',()=>{for(const pack_units of [0,null,-1])assert.equal(evaluate(r,{...q,pack_units}).price,null);});
+test('同链接库存变化保留且待核实',()=>{const t=processTask({requests:[r],quotes:[q,{...q,stock_packs:1}],coverage:{'001':{mainland:c,global:c}}});assert.equal(t.rows.length,2);assert.equal(t.rows.filter(x=>x.eligible).length,0);});
+test('覆盖状态不接受字符串true或空查询词',()=>{for(const patch of [{complete:'true'},{queries:[]}])assert.throws(()=>processTask({requests:[r],quotes:[q],coverage:{'001':{mainland:{...c,...patch}}}}),/大陆/);});
+test('待补充产品不阻塞完整产品且不进入排名',()=>{const pending={id:'P002',status:'待补充',pending_reason:'缺少型号'};const t=processTask({requests:[r,pending],quotes:[q],coverage:{'001':{mainland:c}}});assert.equal(t.summary.length,2);assert.equal(t.summary[1].status,'待补充');assert.equal(t.summary[0].count,1);assert.throws(()=>processTask({requests:[{id:'P003',status:'待用户确认'}]}),/原因/);});
